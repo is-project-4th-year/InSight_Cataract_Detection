@@ -404,7 +404,6 @@ def screening_page():
                 "decisions must be made by a licensed healthcare professional.")
                 # --- END NEW ---
 
-
 # --- PATIENT HISTORY PAGE ---
 def patient_history_page():
     st.title("Patient Screening History")
