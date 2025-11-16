@@ -1,156 +1,253 @@
-import torch
-import torch.nn as nn
-import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader
-from torchvision import transforms, models
+# train_model.py
 import pandas as pd
-from PIL import Image
+import numpy as np
+import tensorflow as tf
+from tensorflow import keras
+from keras import layers, models
 from sklearn.model_selection import train_test_split
+from sklearn.utils import class_weight
 import os
+import matplotlib.pyplot as plt
 
-# ----------------------------
-# 1. Custom Dataset
-# ----------------------------
-class SlitLampDataset(Dataset):
-    def __init__(self, csv_file, transform=None):
-        self.data = pd.read_csv(csv_file)
-        self.transform = transform
+# --- CONFIG ---
+DATA_DIR = "D:/BICS/insightweb/data/images/preprocessed_images/" 
+LABEL_FILE = "D:/BICS/insightweb/data/images/full_df.csv"
+IMG_SIZE = (224, 224)
+BATCH_SIZE = 32
+EPOCHS = 30 # Set to 30 as you requested
+AUTOTUNE = tf.data.AUTOTUNE # For tf.data pipeline
+# ---------------
 
-    def __len__(self):
-        return len(self.data)
+def load_data(label_file):
+    """
+    Loads the CSV, creates binary labels, and VERIFIES files exist.
+    """
+    df = pd.read_csv(label_file)
+    print("Parsing image-level labels...")
+    
+    left_df = df[['Left-Fundus', 'Left-Diagnostic Keywords']].copy()
+    left_df.rename(columns={'Left-Fundus': 'filename'}, inplace=True)
+    left_df['Cataract'] = left_df['Left-Diagnostic Keywords'].apply(lambda x: 1 if 'cataract' in str(x) else 0)
+    
+    right_df = df[['Right-Fundus', 'Right-Diagnostic Keywords']].copy()
+    right_df.rename(columns={'Right-Fundus': 'filename'}, inplace=True)
+    right_df['Cataract'] = right_df['Right-Diagnostic Keywords'].apply(lambda x: 1 if 'cataract' in str(x) else 0)
+    
+    all_images_df = pd.concat([
+        left_df[['filename', 'Cataract']], 
+        right_df[['filename', 'Cataract']]
+    ]).dropna()
+    
+    all_images_df = all_images_df[all_images_df['filename'] != 'db_no_fovea.jpg'].reset_index(drop=True)
+    
+    # Create the full image filepath
+    all_images_df['filepath'] = all_images_df['filename'].apply(lambda x: os.path.join(DATA_DIR, x))
+    
+    # --- NEW: VERIFICATION STEP ---
+    print(f"Verifying {len(all_images_df)} filepaths...")
+    
+    # Check if files exist
+    all_images_df['file_exists'] = all_images_df['filepath'].apply(lambda x: os.path.exists(x))
+    
+    # Filter out missing files
+    original_count = len(all_images_df)
+    all_images_df = all_images_df[all_images_df['file_exists'] == True].copy()
+    new_count = len(all_images_df)
+    
+    if original_count > new_count:
+        removed_count = original_count - new_count
+        print(f"Warning: Removed {removed_count} file references that were missing from the images folder.")
+        
+    if new_count == 0:
+        print("Error: No valid image files were found. Check your DATA_DIR path.")
+        return pd.DataFrame() # Return empty df
+        
+    # We don't need the 'file_exists' column anymore
+    all_images_df = all_images_df.drop(columns=['file_exists'])
+    # -------------------------------
+    
+    # Convert label to integer (tf.data prefers ints)
+    all_images_df['Cataract'] = all_images_df['Cataract'].astype(int)
+    
+    print("Label parsing and file verification complete.")
+    return all_images_df
 
-    def __getitem__(self, idx):
-        img_path = self.data.iloc[idx, 0]
-        label = self.data.iloc[idx, 1]
+# --- Keras 3 Data Augmentation ---
+def data_augmentation(img_size=(224, 224)):
+    """
+    Creates a Keras Sequential model for data augmentation.
+    """
+    return models.Sequential([
+        layers.Input(shape=(*img_size, 3)),
+        layers.RandomFlip("horizontal_and_vertical"),
+        layers.RandomRotation(0.3),
+        layers.RandomZoom(0.2),
+        layers.RandomContrast(0.2),
+    ], name="data_augmentation")
 
-        image = Image.open(img_path).convert("RGB")
+# --- build_model function using MobileNetV2 ---
+def build_model(img_size=(224, 224)):
+    """
+    Builds the MobileNetV2 model using Keras 3.
+    """
+    inputs = layers.Input(shape=(*img_size, 3))
+    
+    augmentation_layers = data_augmentation(img_size)
+    x = augmentation_layers(inputs)
+    
+    x = tf.keras.applications.mobilenet_v2.preprocess_input(x)
+    
+    base_model = tf.keras.applications.MobileNetV2(
+        include_top=False, 
+        weights="imagenet",
+        input_shape=(*img_size, 3),
+        name="base_mobilenet" 
+    )
+    base_model.trainable = False 
 
-        if self.transform:
-            image = self.transform(image)
+    x = base_model(x, training=False) 
+    x = layers.GlobalAveragePooling2D(name="avg_pool")(x)
+    x = layers.BatchNormalization()(x)
+    x = layers.Dropout(0.5, name="top_dropout")(x)
+    x = layers.Dense(128, activation="relu")(x)
+    outputs = layers.Dense(1, activation="sigmoid")(x)
+    
+    model = models.Model(inputs, outputs)
+    
+    model.compile(
+        optimizer=tf.keras.optimizers.Adam(learning_rate=1e-3),
+        loss="binary_crossentropy",
+        metrics=[
+            "accuracy", 
+            tf.keras.metrics.AUC(name="auc"),
+            tf.keras.metrics.Precision(name="precision"),
+            tf.keras.metrics.Recall(name="recall")
+        ]
+    )
+    return model
 
-        return image, label
+# --- tf.data Helper Functions ---
+def parse_image(filename, label):
+    """
+    Loads and preprocesses a single image file.
+    """
+    image = tf.io.read_file(filename)
+    image = tf.image.decode_jpeg(image, channels=3)
+    image = tf.image.resize(image, IMG_SIZE)
+    return image, label
 
-# ----------------------------
-# 2. Transforms
-# ----------------------------
-train_transform = transforms.Compose([
-    transforms.Resize((224, 224)),
-    transforms.RandomHorizontalFlip(),
-    transforms.RandomRotation(10),
-    transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
-    transforms.ToTensor(),
-    transforms.Normalize([0.485, 0.456, 0.406],
-                         [0.229, 0.224, 0.225])
-])
+def create_dataset(df, shuffle=True):
+    """
+    Creates a tf.data.Dataset from a dataframe.
+    """
+    ds = tf.data.Dataset.from_tensor_slices((
+        df['filepath'].values,
+        df['Cataract'].values
+    ))
+    
+    ds = ds.map(parse_image, num_parallel_calls=AUTOTUNE)
+    ds = ds.cache()
+    
+    if shuffle:
+        ds = ds.shuffle(buffer_size=len(df))
+        
+    ds = ds.batch(BATCH_SIZE)
+    ds = ds.prefetch(buffer_size=AUTOTUNE)
+    return ds
 
-val_test_transform = transforms.Compose([
-    transforms.Resize((224, 224)),
-    transforms.ToTensor(),
-    transforms.Normalize([0.485, 0.456, 0.406],
-                         [0.229, 0.224, 0.225])
-])
+# --- MAIN TRAINING SCRIPT ---
+if __name__ == "__main__":
+    
+    # 1. Load Data (now with file verification)
+    all_df = load_data(LABEL_FILE)
+    
+    if all_df.empty:
+        print("Error: Dataframe is empty or no files found. Exiting.")
+        exit()
 
-# ----------------------------
-# 3. Data Split
-# ----------------------------
-csv_path = "data/slit_lamp/labels_slitlamp.csv"
-df = pd.read_csv(csv_path)
+    print(f"Total images found and verified: {len(all_df)}")
+    print(all_df['Cataract'].value_counts())
 
-train_df, temp_df = train_test_split(df, test_size=0.4, stratify=df["label"], random_state=42)
-val_df, test_df = train_test_split(temp_df, test_size=0.5, stratify=temp_df["label"], random_state=42)
+    # 2. Split Data
+    train_df, val_df = train_test_split(
+        all_df, 
+        test_size=0.2, 
+        random_state=42, 
+        stratify=all_df['Cataract']
+    )
+    
+    print(f"\nTraining images: {len(train_df)}")
+    print(f"Validation images: {len(val_df)}")
 
-train_df.to_csv("data/slit_lamp/train.csv", index=False)
-val_df.to_csv("data/slit_lamp/val.csv", index=False)
-test_df.to_csv("data/slit_lamp/test.csv", index=False)
+    # 3. Calculate Class Weights
+    #class_labels = np.array(train_df['Cataract'].values.astype(int))
+    #weights = class_weight.compute_class_weight(
+    #    'balanced',
+    #    classes=np.unique(class_labels),
+    #    y=class_labels
+    #)
+    #class_weights = dict(zip(np.unique(class_labels), weights))
+    # print(f"\nCalculated Class Weights: {class_weights}")
 
-train_dataset = SlitLampDataset("data/slit_lamp/train.csv", transform=train_transform)
-val_dataset = SlitLampDataset("data/slit_lamp/val.csv", transform=val_test_transform)
-test_dataset = SlitLampDataset("data/slit_lamp/test.csv", transform=val_test_transform)
+    # --- Try Manual Weights (Less Aggressive) ---
+    class_weights = {
+        0: 1.0,  # Weight for 'No Cataract'
+        1: 5.0   # Weight for 'Cataract' (Pay 5x more attention)
+    }
+    print(f"\nUsing Manual Class Weights: {class_weights}")
+    # ----------------------------------------
 
-train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True)
-val_loader = DataLoader(val_dataset, batch_size=16, shuffle=False)
-test_loader = DataLoader(test_dataset, batch_size=16, shuffle=False)
+    # 4. Create tf.data.Dataset pipelines
+    print("\nCreating tf.data.Dataset pipelines...")
+    train_ds = create_dataset(train_df, shuffle=True)
+    val_ds = create_dataset(val_df, shuffle=False)
+    print("Pipelines created.")
+    
+    # 5. Build Model
+    model = build_model(img_size=IMG_SIZE)
+    model.summary()
 
-print(f"Data prepared: Train {len(train_dataset)}, Val {len(val_dataset)}, Test {len(test_dataset)}")
+    # 6. Callbacks
+    checkpoint = tf.keras.callbacks.ModelCheckpoint(
+        "cataract_model_v2.keras", 
+        monitor='val_auc', 
+        save_best_only=True, 
+        mode='max',
+        verbose=1
+    )
+    
+    early_stopping = tf.keras.callbacks.EarlyStopping(
+        monitor='val_auc', 
+        patience=10, 
+        mode='max',
+        restore_best_weights=True,
+        verbose=1
+    )
 
-# ----------------------------
-# 4. Model: ResNet18
-# ----------------------------
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print("Using device:", device)
-
-model = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)  # updated for torch>=0.13
-num_features = model.fc.in_features
-model.fc = nn.Linear(num_features, 2)  # 2 classes
-model = model.to(device)
-
-criterion = nn.CrossEntropyLoss()
-optimizer = optim.Adam(model.parameters(), lr=1e-4)
-scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="max", patience=3, factor=0.5)
-
-# ----------------------------
-# 5. Training Loop
-# ----------------------------
-EPOCHS = 20
-patience = 7  # early stopping patience
-best_val_acc = 0.0
-epochs_no_improve = 0
-
-os.makedirs("backend/saved_model", exist_ok=True)
-
-for epoch in range(EPOCHS):
-    model.train()
-    running_loss = 0.0
-    correct, total = 0, 0
-
-    for images, labels in train_loader:
-        images, labels = images.to(device), labels.to(device)
-
-        optimizer.zero_grad()
-        outputs = model(images)
-        loss = criterion(outputs, labels)
-        loss.backward()
-        optimizer.step()
-
-        running_loss += loss.item()
-        _, preds = torch.max(outputs, 1)
-        correct += (preds == labels).sum().item()
-        total += labels.size(0)
-
-    train_acc = 100 * correct / total
-
-    # Validation
-    model.eval()
-    val_correct, val_total = 0, 0
-    with torch.no_grad():
-        for images, labels in val_loader:
-            images, labels = images.to(device), labels.to(device)
-            outputs = model(images)
-            _, preds = torch.max(outputs, 1)
-            val_correct += (preds == labels).sum().item()
-            val_total += labels.size(0)
-
-    val_acc = 100 * val_correct / val_total
-    scheduler.step(val_acc)  # adjust LR if no improvement
-
-    print(f"Epoch [{epoch+1}/{EPOCHS}] "
-          f"Loss: {running_loss/len(train_loader):.4f} "
-          f"Train Acc: {train_acc:.2f}% "
-          f"Val Acc: {val_acc:.2f}%")
-
-    # Save best model
-    if val_acc > best_val_acc:
-        best_val_acc = val_acc
-        torch.save(model.state_dict(), "backend/saved_model/cataract_cnn.pt")
-        print(f"Model improved and saved with Val Acc: {val_acc:.2f}%")
-        epochs_no_improve = 0
-    else:
-        epochs_no_improve += 1
-        print(f"No improvement for {epochs_no_improve} epoch(s)")
-
-    # Early stopping
-    if epochs_no_improve >= patience:
-        print("Early stopping triggered")
-        break
-
-print(f"Training complete. Best Val Acc: {best_val_acc:.2f}%")
+    # 7. Train Model
+    print("\n--- STARTING MODEL TRAINING (using MobileNetV2) ---")
+    
+    history = model.fit(
+        train_ds,
+        epochs=EPOCHS,
+        validation_data=val_ds,
+        class_weight=class_weights,
+        callbacks=[checkpoint, early_stopping]
+    )
+    
+    print("\n--- TRAINING COMPLETE ---")
+    print("The best model has been saved as 'cataract_model_v2.keras'")
+    
+    # 8. Plot training history
+    try:
+        history_df = pd.DataFrame(history.history)
+        plt.figure(figsize=(12, 8))
+        plt.plot(history_df['auc'], label='Train AUC')
+        # --- FIXED TYPO ON THIS LINE ---
+        plt.plot(history_df['val_auc'], label='Validation AUC') 
+        plt.title('Model AUC Over Epochs')
+        plt.legend()
+        plt.savefig('training_history.png')
+        print("Saved training history plot to 'training_history.png'")
+    except Exception as e:
+        print(f"Could not plot history: {e}")
