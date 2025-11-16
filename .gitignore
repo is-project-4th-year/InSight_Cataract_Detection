@@ -1,0 +1,15 @@
+# Image data
+data/
+
+# Keras models
+*.keras
+
+# Virtual environment
+venv/
+
+# Python cache
+__pycache__/
+
+# Secrets file
+.env
+.streamlit/secrets.toml
