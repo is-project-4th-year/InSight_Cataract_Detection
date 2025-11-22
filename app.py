@@ -57,7 +57,7 @@ def load_model():
     # We use the exact same architecture used during training
     model = resnet18(weights=ResNet18_Weights.IMAGENET1K_V1)
     in_features = model.fc.in_features
-    model.fc = nn.Linear(in_features, 2) # Binary classification
+    model.fc = nn.Linear(in_features, 1) 
 
     # Load Weights
     model_path = "fundus_pytorch_model.pt" 
@@ -108,7 +108,7 @@ def generate_gradcam(model, image_tensor, target_class, orig_image):
     if target_class >= output.shape[1]:
         target_class = torch.argmax(output).item()
         
-    loss = output[0, target_class]
+    loss = output[0]
     model.zero_grad()
     loss.backward()
 
@@ -307,12 +307,18 @@ def screening_page():
                         # 1. Preprocess
                         img_tensor = transform(pil_image).unsqueeze(0).to(device)
                         
-                        # 2. Inference
+                        # NEW CODE (Use this)
                         outputs = model(img_tensor)
-                        probabilities = torch.softmax(outputs, dim=1)[0]
-                        # Assume Class 0 = No Cataract, Class 1 = Cataract (Standard for binary)
-                        predicted_class_idx = torch.argmax(probabilities).item()
-                        pred_prob = probabilities[predicted_class_idx].item()
+                        # Use sigmoid for binary classification (1 output node)
+                        pred_prob = torch.sigmoid(outputs).item()
+
+                        if pred_prob > 0.5:
+                            predicted_class_idx = 1 # Cataract
+                            # pred_prob is already the probability of cataract
+                        else:
+                            predicted_class_idx = 0 # No Cataract
+                            # Invert probability so it represents confidence in "No Cataract"
+                            pred_prob = 1 - pred_prob
                         
                         # 3. Generate Grad-CAM locally
                         gradcam_img = generate_gradcam(model, img_tensor, predicted_class_idx, pil_image)
