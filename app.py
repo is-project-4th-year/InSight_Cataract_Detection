@@ -2,18 +2,16 @@ import streamlit as st
 import pandas as pd
 from PIL import Image
 import io
-import numpy as np
-import cv2
-import torch
-import torch.nn as nn
-import torchvision.transforms as transforms
-from torchvision.models import resnet18, ResNet18_Weights
+import plotly.express as px
 from supabase import create_client, Client
 from datetime import datetime
-import plotly.express as px
-from fpdf import FPDF
+import requests 
+import traceback
 import base64
-import os
+from fpdf import FPDF 
+
+# --- API URL (Local Backend) ---
+BACKEND_URL = "http://127.0.0.1:8000/predict/"
 
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="InSight: Cataract Screening", layout="wide")
@@ -22,8 +20,6 @@ st.set_page_config(page_title="InSight: Cataract Screening", layout="wide")
 st.markdown("""
 <style>
     html, body, [class*="st-"], [class*="css-"] { font-family: 'Source Sans Pro', sans-serif; }
-    h1 { font-size: 2.5em; margin-bottom: 0.5em; }
-    h2, h3 { margin-top: 1.5em; margin-bottom: 0.8em; }
     .stButton>button { margin-top: 10px; margin-bottom: 10px; }
     .stAlert { border-radius: 8px; }
 </style>
@@ -32,115 +28,18 @@ st.markdown("""
 # --- SUPABASE CONNECTION ---
 @st.cache_resource
 def init_supabase_client():
-    # Try loading from Streamlit Secrets (Cloud) first, then environment variables (Local)
     try:
         url = st.secrets["SUPABASE_URL"]
         key = st.secrets["SUPABASE_KEY"]
+        return create_client(url, key)
     except:
-        # Fallback for local testing if secrets.toml isn't used
-        url = os.getenv("SUPABASE_URL")
-        key = os.getenv("SUPABASE_KEY")
-        
-    if not url or not key:
-        st.error("Supabase credentials not found. Please check .streamlit/secrets.toml or Cloud Settings.")
+        st.error("❌ Supabase secrets not found. Please check .streamlit/secrets.toml")
         return None
-    return create_client(url, key)
 
 supabase = init_supabase_client()
 
-# --- MODEL LOADING (CACHED) ---
-@st.cache_resource
-def load_model():
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    
-    # Initialize Model Architecture (ResNet18)
-    # We use the exact same architecture used during training
-    model = resnet18(weights=ResNet18_Weights.IMAGENET1K_V1)
-    in_features = model.fc.in_features
-    model.fc = nn.Linear(in_features, 1) 
-
-    # Load Weights
-    model_path = "fundus_pytorch_model.pt" 
-    
-    if not os.path.exists(model_path):
-        st.error(f"⚠️ Model file '{model_path}' not found in the repository.")
-        return None, None
-
-    try:
-        model.load_state_dict(torch.load(model_path, map_location=device))
-        model = model.to(device)
-        model.eval()
-        return model, device
-    except Exception as e:
-        st.error(f"Error loading model: {e}")
-        return None, None
-
-model, device = load_model()
-
-# --- PREPROCESSING TRANSFORMS ---
-transform = transforms.Compose([
-    transforms.Resize((224, 224)),
-    transforms.ToTensor(),
-    transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
-])
-
-class_labels = ["No Cataract", "Cataract Detected"]
-
-# --- GRAD-CAM HELPER ---
-def generate_gradcam(model, image_tensor, target_class, orig_image):
-    gradients = []
-    activations = []
-
-    def forward_hook(module, input, output):
-        activations.append(output)
-
-    def backward_hook(module, grad_in, grad_out):
-        gradients.append(grad_out[0])
-
-    # Hook the last convolutional layer of ResNet18
-    layer = model.layer4[-1].conv2
-    handle_fwd = layer.register_forward_hook(forward_hook)
-    handle_bwd = layer.register_full_backward_hook(backward_hook)
-
-    # Forward & Backward
-    output = model(image_tensor)
-    # Ensure target_class is within bounds (0 or 1)
-    if target_class >= output.shape[1]:
-        target_class = torch.argmax(output).item()
-        
-    loss = output[0]
-    model.zero_grad()
-    loss.backward()
-
-    # Remove hooks to prevent memory leaks
-    handle_fwd.remove()
-    handle_bwd.remove()
-
-    # Process Gradients
-    grads = gradients[0].cpu().data.numpy()
-    acts = activations[0].cpu().data.numpy()
-    weights = np.mean(grads, axis=(2, 3))[0, :]
-    cam = np.zeros(acts.shape[2:], dtype=np.float32)
-
-    for i, w in enumerate(weights):
-        cam += w * acts[0, i, :, :]
-
-    cam = np.maximum(cam, 0)
-    cam = cv2.resize(cam, (orig_image.size[0], orig_image.size[1]))
-    cam = cam - np.min(cam)
-    if np.max(cam) > 0:
-        cam = cam / np.max(cam)
-
-    # Overlay
-    heatmap = cv2.applyColorMap(np.uint8(255 * cam), cv2.COLORMAP_JET)
-    overlay = np.array(orig_image)[:, :, ::-1] # RGB to BGR
-    overlay = cv2.addWeighted(overlay, 0.5, heatmap, 0.5, 0)
-    
-    # Convert back to RGB for display/saving
-    return cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB)
-
-# --- PROFESSIONAL PDF HELPER FUNCTION ---
-def create_screening_report(patient_id, prediction, confidence, recommendation, screened_by, original_image_bytes, overlay_img, original_image_type_mime):
+# --- PDF HELPER (Robust Fix) ---
+def create_screening_report(patient_id, prediction, confidence, recommendation, screened_by, original_image_bytes, overlay_bytes, original_image_type_mime):
     pdf = FPDF()
     pdf.add_page()
     pdf.set_auto_page_break(auto=True, margin=15)
@@ -183,7 +82,6 @@ def create_screening_report(patient_id, prediction, confidence, recommendation, 
         conf_text = f"{confidence:.1%}"
     else:
         conf_text = f"{1-confidence:.1%}"
-        
     pdf.cell(50, 8, "Confidence Level:", 0, 0, "L")
     pdf.cell(0, 8, conf_text, 0, 1, "L")
     
@@ -193,68 +91,57 @@ def create_screening_report(patient_id, prediction, confidence, recommendation, 
     pdf.cell(0, 8, recommendation, 0, 1, "L")
     pdf.ln(10)
 
-    # --- IMAGES SECTION ---
+    # Images Section
     pdf.set_font("Times", "B", 14)
     pdf.cell(0, 10, "Analysis Visualization", 0, 1, "L")
-    
     y_images = pdf.get_y()
     
-    # 1. Original Image (Left Side)
+    # 1. Original Image (Left)
     try:
         img_stream = io.BytesIO(original_image_bytes)
-        # Handle mime types safely
-        if original_image_type_mime and '/' in original_image_type_mime:
-            img_type = original_image_type_mime.split('/')[-1].upper()
-        else:
-            img_type = "JPG" # Default fallback
-            
-        if img_type == "JPEG": img_type = "JPG"
+        img_stream.seek(0) # Rewind
         
-        # Place image at x=10
+        img_type = "JPG"
+        if original_image_type_mime and "png" in original_image_type_mime.lower(): 
+            img_type = "PNG"
+            
         pdf.image(img_stream, x=10, y=y_images, w=90, type=img_type)
         
-        # Label below image
         pdf.set_xy(10, y_images + 90)
         pdf.set_font("Times", "", 10)
         pdf.cell(90, 5, "Original Fundus Image", 0, 0, "C")
-        
-    except Exception as e:
-        print(f"Error adding original image to PDF: {e}") # Print error to logs so we know why!
-        pdf.set_xy(10, y_images)
-        pdf.cell(90, 90, "Image Error", 1, 0, "C")
+    except Exception as e: 
+        print(f"PDF Original Image Error: {e}")
 
-    # 2. Grad-CAM Image (Right Side)
+    # 2. Grad-CAM Image (Right)
     try:
-        # Convert numpy array to image bytes for PDF
-        gc_pil = Image.fromarray(overlay_img)
-        gc_stream = io.BytesIO()
-        gc_pil.save(gc_stream, format="PNG")
+        gc_stream = io.BytesIO(overlay_bytes) # Already bytes from backend
+        gc_stream.seek(0) # Rewind
         
-        # Place image at x=110 (10mm gap from left image)
         pdf.image(gc_stream, x=110, y=y_images, w=90, type="PNG")
         
-        # Label below image
         pdf.set_xy(110, y_images + 90)
-        pdf.set_font("Times", "", 10)
         pdf.cell(90, 5, "AI Visualization (Grad-CAM)", 0, 0, "C")
-        
-    except Exception as e:
-        print(f"Error adding Grad-CAM to PDF: {e}")
-        pdf.set_xy(110, y_images)
-        pdf.cell(90, 90, "Visualization Error", 1, 0, "C")
+    except Exception as e: 
+        print(f"PDF Grad-CAM Error: {e}")
     
-    # Disclaimer (Footer)
+    # Disclaimer
     pdf.set_y(-35)
     pdf.line(10, pdf.get_y(), 200, pdf.get_y())
     pdf.ln(5)
     pdf.set_font("Times", "I", 9)
     pdf.set_text_color(108, 117, 125)
-    pdf.multi_cell(0, 5, "DISCLAIMER: This report is generated by an AI-assisted screening tool (InSight) and is intended for informational purposes only. It is not a medical diagnosis.", 0, "C")
+    pdf.multi_cell(0, 5, "DISCLAIMER: This report is generated by an AI-assisted screening tool (InSight). Not a medical diagnosis.", 0, "C")
     
-    # Return with correct encoding for browser download
-    return pdf.output(dest='S').encode('latin-1')
+    # --- FIX FOR ATTRIBUTE ERROR ---
+    out = pdf.output(dest='S')
+    # Check if it's already bytes/bytearray (Py3 FPDF behavior can vary)
+    if isinstance(out, (bytes, bytearray)):
+        return bytes(out)
+    # Otherwise encode string to bytes
+    return out.encode('latin-1')
 
-# --- AUTHENTICATION ---
+# --- AUTH FUNCTIONS ---
 def main_auth_page():
     st.title("InSight Cataract Screening")
     st.write("Please log in or sign up to continue.")
@@ -264,14 +151,12 @@ def main_auth_page():
         with st.form("login_form"):
             email = st.text_input("Email")
             password = st.text_input("Password", type="password")
-            submitted = st.form_submit_button("Login")
-            if submitted:
+            if st.form_submit_button("Login"):
                 try:
                     session = supabase.auth.sign_in_with_password({"email": email, "password": password})
                     st.session_state["session"] = session
                     st.session_state["logged_in"] = True
                     
-                    # Fetch Role
                     user_id = session.user.id
                     role_data = supabase.table('user_roles').select('role').eq('user_id', user_id).single().execute()
                     user_role = "Nurse"
@@ -285,14 +170,13 @@ def main_auth_page():
         with st.form("signup_form"):
             email = st.text_input("Email")
             password = st.text_input("Password", type="password")
-            role = st.selectbox("Select your role", ("Nurse", "Doctor"))
-            submitted = st.form_submit_button("Sign Up")
-            if submitted:
+            role = st.selectbox("Role", ("Nurse", "Doctor"))
+            if st.form_submit_button("Sign Up"):
                 try:
                     session = supabase.auth.sign_up({"email": email, "password": password})
                     if session.user:
                         supabase.table('user_roles').insert({'user_id': session.user.id, 'email': email, 'role': role}).execute()
-                        st.success("Signup successful! Please check your email.")
+                        st.success("Signup successful!")
                     else: st.error("Signup failed.")
                 except Exception as e: st.error(f"Error: {e}")
 
@@ -302,125 +186,75 @@ def logout():
     st.session_state.pop("session", None)
     st.rerun()
 
-# --- SCREENING PAGE ---
+# --- PAGES ---
 def screening_page():
     st.title("New Patient Screening")
     st.write("Upload a fundus photograph to screen for cataracts.")
-    
     uploaded_file = st.file_uploader("Upload Fundus Image", type=["jpg", "jpeg", "png"])
     patient_id = st.text_input("Patient Identifier")
 
     if uploaded_file and patient_id:
-        st.write("")
         col1, col2 = st.columns(2)
-        
-        # Prepare images
         image_bytes = uploaded_file.getvalue()
-        pil_image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        pil_image = Image.open(io.BytesIO(image_bytes))
         
         with col1:
             st.image(pil_image, caption="Uploaded Image", use_container_width=True)
 
         if st.button("Analyze Image"):
-            if model is None:
-                st.error("AI Model failed to load. Please check server logs.")
-            else:
-                with col2:
-                    with st.spinner("Running AI Analysis..."):
-                        # 1. Preprocess
-                        img_tensor = transform(pil_image).unsqueeze(0).to(device)
+            with col2:
+                with st.spinner("Analyzing image... (Connecting to backend)"):
+                    try:
+                        files = {'file': (uploaded_file.name, image_bytes, uploaded_file.type)}
+                        response = requests.post(BACKEND_URL, files=files)
+                        response.raise_for_status() 
                         
-                        # NEW CODE (Use this)
-                        outputs = model(img_tensor)
-                        # Use sigmoid for binary classification (1 output node)
-                        pred_prob = torch.sigmoid(outputs).item()
+                        result = response.json()
+                        pred_prob = result["prediction_probability"]
+                        gc_bytes = base64.b64decode(result["gradcam_image_base64"])
 
                         if pred_prob > 0.5:
-                            predicted_class_idx = 1 # Cataract
-                            # pred_prob is already the probability of cataract
-                        else:
-                            predicted_class_idx = 0 # No Cataract
-                            # Invert probability so it represents confidence in "No Cataract"
-                            pred_prob = 1 - pred_prob
-                        
-                        # 3. Generate Grad-CAM locally
-                        gradcam_img = generate_gradcam(model, img_tensor, predicted_class_idx, pil_image)
-
-                        # 4. Logic
-                        if predicted_class_idx == 1: # Cataract
                             label = "Cataract Detected"
-                            recommendation = "Urgent: Refer to Ophthalmologist"
-                            st.error(f"**Result: {label}** (Confidence: {pred_prob:.1%})")
+                            rec = "Urgent: Refer to Ophthalmologist"
+                            st.error(f"**{label}** ({pred_prob:.1%})")
                         else:
                             label = "No Cataract Detected"
-                            recommendation = "Routine: Next annual check-up"
-                            st.success(f"**Result: {label}** (Confidence: {pred_prob:.1%})")
+                            rec = "Routine Check-up"
+                            st.success(f"**{label}** ({1-pred_prob:.1%})")
                         
-                        st.warning(f"**Recommendation: {recommendation}**")
+                        st.warning(f"**Recommendation: {rec}**")
+                        st.image(gc_bytes, caption="Grad-CAM Heatmap", use_container_width=True)
                         
-                        st.image(gradcam_img, caption="Grad-CAM Heatmap", use_container_width=True)
-
-                        # Store results in session state to allow saving/exporting after interaction
-                        st.session_state["last_result"] = {
-                            "patient_id": patient_id,
-                            "label": label,
-                            "prob": pred_prob,
-                            "rec": recommendation,
-                            "img_bytes": image_bytes,
-                            "gc_img": gradcam_img,
-                            "mime": uploaded_file.type
+                        # Save result to session state for buttons
+                        st.session_state["last_res"] = {
+                            "pid": patient_id, "label": label, "prob": pred_prob, "rec": rec,
+                            "img": image_bytes, "gc": gc_bytes, "mime": uploaded_file.type
                         }
+                    except Exception as e: st.error(f"Connection Error: Is backend running? {e}")
 
-        # Buttons for Save/Export (Only show if a result exists for THIS patient)
-        if "last_result" in st.session_state and st.session_state["last_result"]["patient_id"] == patient_id:
-            res = st.session_state["last_result"]
-            btn_col1, btn_col2, btn_col3 = st.columns(3)
-            
-            with btn_col1:
+        # Show Buttons if result exists
+        if "last_res" in st.session_state and st.session_state["last_res"]["pid"] == patient_id:
+            res = st.session_state["last_res"]
+            c1, c2, c3 = st.columns(3)
+            with c1:
                 if st.button("Save Results", use_container_width=True):
                     try:
-                        data_to_insert = {
-                            "patient_identifier": res["patient_id"],
-                            "image_filename": uploaded_file.name,
-                            "predicted_label": res["label"],
-                            "prediction_probability": res["prob"],
-                            "recommendation": res["rec"],
-                            "screened_by_user": st.session_state["user_name"]
-                        }
-                        supabase.table('screenings').insert(data_to_insert).execute()
+                        supabase.table('screenings').insert({
+                            "patient_identifier": res["pid"], "image_filename": uploaded_file.name,
+                            "predicted_label": res["label"], "prediction_probability": res["prob"],
+                            "recommendation": res["rec"], "screened_by_user": st.session_state["user_name"]
+                        }).execute()
                         st.success("Saved results successfully!")
-                    except Exception as e: st.error(f"Error saving to database: {e}")
+                    except Exception as e: st.error(f"Save failed: {e}")
+            
+            with c2:
+                # Generate PDF
+                pdf = create_screening_report(res["pid"], res["label"], res["prob"], res["rec"], st.session_state["user_name"], res["img"], res["gc"], res["mime"])
+                st.download_button("Export PDF Report", pdf, f"InSight_Report_{res['pid']}.pdf", "application/pdf", use_container_width=True)
+            
+            with c3:
+                st.download_button("Export Grad-CAM", res["gc"], f"{res['pid']}_gradcam.png", "image/png", use_container_width=True)
 
-            with btn_col2:
-                pdf_bytes = create_screening_report(
-                    res["patient_id"], res["label"], res["prob"], res["rec"],
-                    st.session_state["user_name"], res["img_bytes"], res["gc_img"], res["mime"]
-                )
-                st.download_button(
-                    label="Export PDF Report",
-                    data=pdf_bytes,
-                    file_name=f"InSight_Report_{res['patient_id']}.pdf",
-                    mime="application/pdf",
-                    use_container_width=True
-                )
-                
-            with btn_col3:
-                # Convert numpy array to bytes for download
-                gc_pil = Image.fromarray(res["gc_img"])
-                buf = io.BytesIO()
-                gc_pil.save(buf, format="PNG")
-                st.download_button(
-                    label="Export Grad-CAM",
-                    data=buf.getvalue(),
-                    file_name=f"{res['patient_id']}_gradcam.png",
-                    mime="image/png",
-                    use_container_width=True
-                )
-                
-            st.caption("DISCLAIMER: This report is generated by an AI-assisted screening tool (InSight) and is intended for informational purposes only. It is not a substitute for a comprehensive examination and diagnosis by a qualified ophthalmologist.")
-
-
-# --- HISTORY PAGE ---
 def patient_history_page():
     st.title("Patient Screening History")
     st.write("Enter a Patient Identifier to view their past screening results.")
@@ -434,7 +268,8 @@ def patient_history_page():
                 if query.data:
                     df = pd.DataFrame(query.data)
                     df['created_at'] = pd.to_datetime(df['created_at']).dt.strftime('%Y-%m-%d %H:%M:%S')
-                    # Cleanup columns for display
+                    df['prediction_probability'] = df['prediction_probability'].apply(lambda x: f"{x:.1%}" if pd.notna(x) else "N/A")
+                    
                     display_df = df[['created_at', 'predicted_label', 'prediction_probability', 'recommendation', 'screened_by_user', 'image_filename']].rename(columns={'created_at': 'Screening Date', 'predicted_label': 'Prediction', 'prediction_probability': 'Confidence', 'recommendation': 'Recommendation', 'screened_by_user': 'Screened By', 'image_filename': 'Original Image'})
                     st.dataframe(display_df, use_container_width=True)
                 else:
@@ -442,7 +277,6 @@ def patient_history_page():
             except Exception as e:
                 st.error(f"Error fetching history: {e}")
 
-# --- ANALYTICS PAGE ---
 def analytics_page():
     st.title("Analytics Dashboard")
     st.write("Overview of screening metrics. (Only Doctors can see this page)")
@@ -481,23 +315,18 @@ def analytics_page():
     st.subheader("Recent Screening Data")
     st.dataframe(df.sort_values(by="created_at", ascending=False).head(10), use_container_width=True)
 
-# --- MAIN ROUTER ---
+# --- ROUTER ---
 if "logged_in" not in st.session_state: st.session_state["logged_in"] = False
-
-if not st.session_state["logged_in"]:
-    main_auth_page()
+if not st.session_state["logged_in"]: main_auth_page()
 else:
     st.sidebar.title("Navigation")
     st.sidebar.write(f"Welcome, **{st.session_state['user_name']}**!")
     st.sidebar.write(f"Role: *{st.session_state['user_role']}*")
     
-    page_options = ["Screening", "Patient History"]
-    if st.session_state["user_role"] == "Doctor":
-        page_options.append("Analytics")
-        
-    page = st.sidebar.radio("Go to", page_options)
+    opts = ["Screening", "Patient History"]
+    if st.session_state["user_role"] == "Doctor": opts.append("Analytics")
+    page = st.sidebar.radio("Go to", opts)
     st.sidebar.divider()
-    
     if st.sidebar.button("Logout"): logout()
     
     if page == "Screening": screening_page()
