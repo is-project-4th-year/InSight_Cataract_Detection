@@ -1,0 +1,10 @@
+streamlit
+supabase
+plotly
+fpdf
+Pillow
+requests
+numpy
+opencv-python-headless
+torch
+torchvision
