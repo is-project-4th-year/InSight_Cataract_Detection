@@ -105,11 +105,11 @@ async def predict(file: UploadFile = File(...)):
             output = model(img_tensor)
             prob = torch.sigmoid(output).item()
         
-        # Logic: > 0.5 is Cataract
-        if prob > 0.5:
-            prediction_probability = prob
-        else:
-            prediction_probability = 1 - prob
+        # Simply return this raw probability. Let the frontend handle the > 0.5 logic.
+        return {
+            "prediction_probability": prob, 
+            "gradcam_image_base64": gradcam_base64
+        }
 
         # 2. Grad-CAM
         with torch.enable_grad():
