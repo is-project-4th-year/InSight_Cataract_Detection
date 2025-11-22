@@ -1,4 +1,3 @@
-# backend_app.py
 import io
 import torch
 import torch.nn as nn
@@ -14,7 +13,7 @@ import os
 
 app = FastAPI()
 
-# Allow connection from Streamlit
+# Allow connection from Streamlit/React
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -58,12 +57,14 @@ def get_gradcam(model, img_tensor, orig_img):
     def b_hook(m, gi, go): gradients.append(go[0])
     def f_hook(m, i, o): activations.append(o)
     
+    # Ensure we are hooking into the correct layer for ResNet18
     layer = model.layer4[-1].conv2
     h1 = layer.register_forward_hook(f_hook)
     h2 = layer.register_full_backward_hook(b_hook)
     
     # Forward
     out = model(img_tensor)
+    
     # Backward
     loss = out[0]
     model.zero_grad()
@@ -72,6 +73,10 @@ def get_gradcam(model, img_tensor, orig_img):
     h1.remove()
     h2.remove()
     
+    # Safety check for empty gradients
+    if not gradients or not activations:
+        return np.array(orig_img)
+
     grads = gradients[0].cpu().data.numpy()[0]
     acts = activations[0].cpu().data.numpy()[0]
     
@@ -100,29 +105,37 @@ async def predict(file: UploadFile = File(...)):
         image = Image.open(io.BytesIO(contents)).convert("RGB")
         img_tensor = transform(image).unsqueeze(0).to(device)
 
+        # Initialize variables to None to prevent UnboundLocalError
+        prob = 0.0
+        gradcam_base64 = None
+
         # 1. Prediction
         with torch.no_grad():
             output = model(img_tensor)
             prob = torch.sigmoid(output).item()
         
-        # Simply return this raw probability. Let the frontend handle the > 0.5 logic.
+        # 2. Grad-CAM Generation
+        # We removed the premature 'return' statement that was here.
+        try:
+            with torch.enable_grad():
+                gradcam_img = get_gradcam(model, img_tensor, image)
+            
+            # Encode to base64
+            _, buffer = cv2.imencode(".png", cv2.cvtColor(gradcam_img, cv2.COLOR_RGB2BGR))
+            gradcam_base64 = base64.b64encode(buffer).decode("utf-8")
+        except Exception as cam_error:
+            print(f"Grad-CAM Error: {cam_error}")
+            # If Grad-CAM fails, we can still return the prediction without crashing
+            gradcam_base64 = None
+
+        # 3. Final Return
         return {
             "prediction_probability": prob, 
             "gradcam_image_base64": gradcam_base64
         }
 
-        # 2. Grad-CAM
-        with torch.enable_grad():
-            gradcam_img = get_gradcam(model, img_tensor, image)
-        
-        # Encode to base64
-        _, buffer = cv2.imencode(".png", cv2.cvtColor(gradcam_img, cv2.COLOR_RGB2BGR))
-        gradcam_base64 = base64.b64encode(buffer).decode("utf-8")
-
-        return {
-            "prediction_probability": prediction_probability,
-            "gradcam_image_base64": gradcam_base64
-        }
     except Exception as e:
         print(f"Error: {e}")
         return {"error": str(e)}
+    
+    
