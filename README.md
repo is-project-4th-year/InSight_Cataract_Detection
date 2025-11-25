@@ -1,4 +1,4 @@
-# InSight: AI-Powered Cataract Screening System
+# InSight: Automated Detection of Cataracts in Retinal Image Data using CNN
 
 [![Python](https://img.shields.io/badge/Python-3.9%2B-blue?logo=python&logoColor=white)](https://www.python.org/)
 [![Framework](https://img.shields.io/badge/Streamlit-FF4B4B?logo=streamlit&logoColor=white)](https://streamlit.io/)
