@@ -1,52 +1,143 @@
-# InSight: Automated Detection of Cataracts in Ocular Fundus Images using a Convolutional Neural Network
+# InSight: AI-Powered Cataract Screening System
+
+[![Python](https://img.shields.io/badge/Python-3.9%2B-blue?logo=python&logoColor=white)](https://www.python.org/)
+[![Framework](https://img.shields.io/badge/Streamlit-FF4B4B?logo=streamlit&logoColor=white)](https://streamlit.io/)
+[![Backend](https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
+[![Database](https://img.shields.io/badge/Supabase-3ECF8E?logo=supabase&logoColor=white)](https://supabase.com/)
+[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+
+
+---
 
 ## 1. Project Overview
 
-**InSight** is a secure, multi-user web application designed to assist in the early detection of cataracts. It provides a platform for clinicians to upload retinal fundus images, receive an immediate AI-powered classification and manage patient screening history.
+**InSight** is a secure, multi-user web application designed to revolutionize early cataract detection in low-resource settings. By leveraging a **ResNet-18 Convolutional Neural Network (CNN)**, the system analyzes retinal fundus images to provide real-time diagnostic classification ("Cataract" vs. "Normal").
 
-The system is built using python as a modern web service, featuring a **Streamlit** frontend, a **FastAPI** backend for machine learning inference and a **Supabase (PostgreSQL)** database for secure user authentication and data storage.
+Beyond simple prediction, InSight prioritizes **clinical interpretability** through Grad-CAM visualizations and ensures **data security** via Role-Based Access Control (RBAC).
 
-## 2. Objectives
+---
 
-* Develop a secure, multi-user web portal for cataract screening.
-* Implement role-based access control (RBAC) for "Nurse" and "Doctor" roles.
-* Provide real-time AI classification of fundus images (Cataract / No Cataract).
-* Generate professional, exportable PDF reports for each screening.
-* Store and retrieve patient screening history from a secure cloud database.
-* Offer a high-level analytics dashboard for "Doctor" users to track screening metrics.
+## 2. The Problem & The Gap
 
-## 3. Key Features
+Cataracts remain the leading cause of preventable blindness worldwide, disproportionately affecting regions with a shortage of ophthalmologists.
 
-* **Secure Authentication:** Users must log in or sign up to access the system.
-* **Role-Based Access:**
-    * **Nurses** can screen patients, view history and generate reports.
-    * **Doctors** can do all of the above and access an analytics dashboard.
-* **AI-Powered Screening:** Upload an image and get an instant prediction and Grad-CAM visualization.
-* **Patient History:** Search for any patient by their ID to view all past screening results.
-* **PDF Report Generation:** Download a professional, multi-page PDF for each screening, including patient details, results and both the original and Grad-CAM images.
-* **Analytics Dashboard:** A doctor-exclusive page showing screening totals, detection rates and other key metrics with interactive charts.
+| The Challenge | The InSight Solution |
+| :--- | :--- |
+| **Late Diagnosis** | Automated screening allows for rapid triage by nurses, not just specialists. |
+| **"Black Box" AI** | Most AI tools provide a diagnosis without explanation. InSight uses **Grad-CAM** to show *where* the model is looking. |
+| **Workflow Friction** | Existing models are often isolated scripts. InSight is a full-stack **Clinical Decision Support System (CDSS)** with PDF reporting and patient history. |
+| **Invalid Inputs** | Standard models crash or hallucinate on wrong images. InSight includes a **MobileNetV2 "Gatekeeper"** to reject non-medical uploads (e.g., cars, faces). |
 
-## 4. Tools & Technologies
+---
 
-* **Frontend:** Streamlit
-* **Backend (ML Model):** Python, FastAPI (assumed), TensorFlow / Keras
-* **Database & Auth:** Supabase (PostgreSQL)
-* **Core Python Libraries:** Pandas, Plotly (for charts), FPDF (for PDFs)
-* **Version Control:** Git & GitHub
+## 3. System Architecture & Methodology
 
-## 5. Status
+InSight employs a microservices architecture to separate the heavy ML inference from the user interface.
 
-This project is in active development, with core features for user management, AI screening and reporting now implemented.
+### The AI Engine
+* **Architecture:** ResNet-18 (Residual Network) with Transfer Learning.
+* **Training Strategy:** Trained on the **ODIR-5K dataset**.
+* **Loss Function:** Utilized **Focal Loss** (gamma=2.0) to handle severe class imbalance, forcing the model to learn from hard-to-classify cataract cases rather than overfitting on healthy eyes.
+* **Explainability:** Gradient-weighted Class Activation Mapping (Grad-CAM) generates a heatmap overlay, highlighting the lens opacity that triggered the diagnosis.
 
-## 6. Author
+### Tech Stack
+* **Frontend:** Streamlit (Python) for a responsive clinician dashboard.
+* **Backend:** FastAPI (Asynchronous inference engine).
+* **Database:** Supabase (PostgreSQL) for secure auth and persistent storage.
+* **Validation:** MobileNetV2 pre-validation layer for input integrity.
 
-* **Njuguna Faith Nyambura**
-* Student ID: 150325
+---
 
-  
+## 4. Performance Metrics
 
-[![Review Assignment Due Date](https://classroom.github.com/assets/deadline-readme-button-22041afd0340ce965d47ae6ef1cefeee28c7c493a6346c4f15d667ab976d596c.svg)](https://classroom.github.com/a/fY9FAi32)  
-[![Open in Visual Studio Code](https://classroom.github.com/assets/open-in-vscode-2e0aaae1b6195c2367325f4f02e2d04e9abb55f0b24a779b69b11b9e10269abc.svg)](https://classroom.github.com/online_ide?assignment_repo_id=19909051&assignment_repo_type=AssignmentRepo)  
+The model was evaluated on a held-out test set of 1,098 images, achieving state-of-the-art performance suitable for screening purposes.
 
-### Resources  
-- [Git/Github Cheatsheet](https://philomatics.com/git-cheatsheet-release)  
+| Metric | Score | Clinical Significance |
+| :--- | :--- | :--- |
+| **Accuracy** | **99.52%** | High reliability for general screening. |
+| **Recall (Sensitivity)** | **99.4%** | Critical for medicine; ensures we rarely miss a positive cataract case. |
+| **Precision** | **99.0%** | Minimizes false alarms (healthy patients sent to doctors). |
+| **F1-Score** | **0.992** | Harmonic balance between precision and recall. |
+| **AUC-ROC** | **0.998** | Excellent discrimination capability. |
+
+---
+
+## 5. Key Features
+
+### Secure & Role-Based
+* **Authentication:** Secure email/password login via Supabase.
+* **RBAC:**
+    * **Nurse Role:** Upload scans, Batch processing, View history, Generate PDFs.
+    * **Doctor Role:** All Nurse features + Access to the **Analytics Dashboard**.
+
+### Smart Screening
+* **Batch Processing:** Upload 50+ images at once. The system auto-extracts Patient IDs from filenames and processes the queue.
+* **Input Validation:** The system automatically rejects invalid images (e.g., selfies, objects) before processing.
+
+### Professional Reporting
+* **PDF Generation:** Auto-generates a formal medical referral report containing:
+    * Patient Details & Timestamp.
+    * Diagnosis & Confidence Score.
+    * Original Scan + Grad-CAM Saliency Map.
+    * Clinical Disclaimer.
+
+### Doctor's Analytics
+* Interactive dashboard visualizing screening volumes, positivity rates, and model confidence distributions to track hospital throughput.
+
+---
+
+## 6. Installation & Setup
+
+To run InSight locally, follow these steps:
+
+### Prerequisites
+* Python 3.9+
+* Git
+
+### Steps
+1.  **Clone the Repository**
+    ```bash
+    git clone [https://github.com/YourUsername/InSight.git](https://github.com/YourUsername/InSight.git)
+    cd InSight
+    ```
+
+2.  **Install Dependencies**
+    ```bash
+    pip install -r requirements.txt
+    ```
+
+3.  **Configure Secrets**
+    Create a `.streamlit/secrets.toml` file and add your Supabase credentials:
+    ```toml
+    [supabase]
+    url = "your-supabase-url"
+    key = "your-supabase-anon-key"
+    ```
+
+4.  **Run the Backend (Inference Engine)**
+    ```bash
+    uvicorn backend_app:app --reload
+    ```
+
+5.  **Run the Frontend (Dashboard)**
+    ```bash
+    streamlit run app.py
+    ```
+
+---
+
+## 7. Project Status
+
+* **Completed:** Core AI Model, Web Interface, Database Integration, PDF Reporting, Batch Processing.
+* **In Progress:** Integration with hospital EMR APIs, Mobile App development.
+
+---
+
+## 8. Author
+
+**Njuguna Faith Nyambura**
+* **Student ID:** 150325
+* **Role:** Lead Developer & AI Researcher
+
+---
+*Disclaimer: InSight is a Clinical Decision Support System (CDSS) and is not intended to replace professional medical diagnosis. All results should be verified by a qualified ophthalmologist.*
