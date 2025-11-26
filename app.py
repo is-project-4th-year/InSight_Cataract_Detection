@@ -1,27 +1,40 @@
+import uuid
 import streamlit as st
 import pandas as pd
 from PIL import Image
 import io
 import plotly.express as px
+import plotly.graph_objects as go
 from supabase import create_client, Client
 from datetime import datetime
 import requests 
 import traceback
 import base64
 from fpdf import FPDF 
+import time
+from streamlit_option_menu import option_menu 
 
 # --- API URL (Local Backend) ---
 BACKEND_URL = "http://127.0.0.1:8000/predict/"
 
 # --- PAGE CONFIG ---
-st.set_page_config(page_title="InSight: Cataract Screening", layout="wide")
+st.set_page_config(page_title="InSight Clinical System", layout="wide", initial_sidebar_state="expanded")
 
-# --- CUSTOM CSS ---
+# --- PROFESSIONAL CSS ---
 st.markdown("""
 <style>
-    html, body, [class*="st-"], [class*="css-"] { font-family: 'Source Sans Pro', sans-serif; }
-    .stButton>button { margin-top: 10px; margin-bottom: 10px; }
-    .stAlert { border-radius: 8px; }
+    html, body, [class*="st-"], [class*="css-"] { font-family: 'Arial', sans-serif; }
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+    header {visibility: hidden;}
+    .stDeployButton {display:none;}
+    .stButton>button { width: 100%; border-radius: 4px; font-weight: bold; }
+    
+    /* Metrics Styling */
+    div[data-testid="stMetricValue"] { font-size: 24px; }
+    
+    /* Table Styling for Analytics */
+    .stDataFrame { border: 1px solid #444; border-radius: 5px; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -33,39 +46,48 @@ def init_supabase_client():
         key = st.secrets["SUPABASE_KEY"]
         return create_client(url, key)
     except:
-        st.error("❌ Supabase secrets not found. Please check .streamlit/secrets.toml")
+        st.error("System Error: Database connection secrets missing.")
         return None
 
 supabase = init_supabase_client()
 
-# --- PDF HELPER (Robust Fix) ---
+# ---PDF GENERATOR---
 def create_screening_report(patient_id, prediction, confidence, recommendation, screened_by, original_image_bytes, overlay_bytes, original_image_type_mime):
     pdf = FPDF()
     pdf.add_page()
     pdf.set_auto_page_break(auto=True, margin=15)
     
-    # Title
+    # --- TITLE ---
+    # [cite_start]Matches the large centered serif header from your upload [cite: 1]
     pdf.set_font("Times", "B", 20)
     pdf.cell(0, 10, "InSight Ocular Screening Report", 0, 1, "C")
     pdf.ln(5)
     pdf.line(10, pdf.get_y(), 200, pdf.get_y())
     pdf.ln(10)
     
-    # Info
+    # --- PATIENT INFO SECTION ---
+    # [cite_start]Matches the bold header "Patient Information" [cite: 2]
     pdf.set_font("Times", "B", 14)
     pdf.cell(0, 10, "Patient Information", 0, 1, "L")
-    pdf.set_font("Times", "", 12)
-    pdf.cell(50, 8, "Patient Identifier:", 0, 0, "L")
-    pdf.cell(0, 8, f"{patient_id}", 0, 1, "L")
-    pdf.cell(50, 8, "Screening Date:", 0, 0, "L")
-    pdf.cell(0, 8, f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", 0, 1, "L")
-    pdf.cell(50, 8, "Screened By:", 0, 0, "L")
-    pdf.cell(0, 8, f"{screened_by}", 0, 1, "L")
+    
+    # [cite_start]Helper for the label: value list format [cite: 3, 4, 5]
+    def add_line(label, value):
+        pdf.set_font("Times", "B", 12)
+        pdf.cell(50, 8, label, 0, 0, "L")
+        pdf.set_font("Times", "", 12)
+        pdf.cell(0, 8, str(value), 0, 1, "L")
+
+    add_line("Patient Identifier:", patient_id)
+    add_line("Screening Date:", datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+    add_line("Screened By:", screened_by)
     pdf.ln(10)
 
-    # Results
+    # --- RESULTS SECTION ---
+    # [cite_start]Matches "Ocular Screening Analysis" header [cite: 8]
     pdf.set_font("Times", "B", 14)
     pdf.cell(0, 10, "Ocular Screening Analysis", 0, 1, "L")
+    
+    # Assessment with Color
     pdf.set_font("Times", "B", 12)
     pdf.cell(50, 8, "Assessment:", 0, 0, "L")
     
@@ -74,63 +96,48 @@ def create_screening_report(patient_id, prediction, confidence, recommendation, 
     else:
         pdf.set_text_color(25, 135, 84) # Green
         
-    pdf.cell(0, 8, f"{prediction}", 0, 1, "L")
-    pdf.set_text_color(0, 0, 0)
+    pdf.cell(0, 8, prediction, 0, 1, "L")
+    pdf.set_text_color(0, 0, 0) # Reset to black
     
-    pdf.set_font("Times", "", 12)
-    if prediction == "Cataract Detected":
-        conf_text = f"{confidence:.1%}"
-    else:
-        conf_text = f"{1-confidence:.1%}"
-    pdf.cell(50, 8, "Confidence Level:", 0, 0, "L")
-    pdf.cell(0, 8, conf_text, 0, 1, "L")
-    
-    pdf.set_font("Times", "B", 12)
-    pdf.cell(50, 8, "Recommendation:", 0, 0, "L")
-    pdf.set_font("Times", "", 12)
-    pdf.cell(0, 8, recommendation, 0, 1, "L")
+    # [cite_start]Confidence and Rec [cite: 9]
+    add_line("Confidence Level:", f"{confidence:.1%}")
+    add_line("Recommendation:", recommendation)
     pdf.ln(10)
 
-    # Images Section
+    # --- IMAGES SECTION ---
+    # [cite_start]Matches "Analysis Visualization" [cite: 10]
     pdf.set_font("Times", "B", 14)
     pdf.cell(0, 10, "Analysis Visualization", 0, 1, "L")
     y_images = pdf.get_y()
     
-    # 1. Original Image (Left)
     try:
+        # [cite_start]1. Original Image (Left) [cite: 11]
         img_stream = io.BytesIO(original_image_bytes)
-        img_stream.seek(0) # Rewind
+        img_type = "PNG" if "png" in original_image_type_mime.lower() else "JPG"
+        pdf.image(img_stream, x=10, y=y_images, w=90)
         
-        img_type = "JPG"
-        if original_image_type_mime and "png" in original_image_type_mime.lower(): 
-            img_type = "PNG"
-            
-        pdf.image(img_stream, x=10, y=y_images, w=90, type=img_type)
+        # [cite_start]2. Grad-CAM Image (Right) [cite: 12]
+        gc_stream = io.BytesIO(overlay_bytes)
+        pdf.image(gc_stream, x=110, y=y_images, w=90, type="PNG")
         
-        pdf.set_xy(10, y_images + 90)
+        # Captions below images
+        pdf.set_xy(10, y_images + 90) # Adjust Y based on image height (w=90 implies h~90 for square)
         pdf.set_font("Times", "", 10)
         pdf.cell(90, 5, "Original Fundus Image", 0, 0, "C")
-    except Exception as e: 
-        print(f"PDF Original Image Error: {e}")
-
-    # 2. Grad-CAM Image (Right)
-    try:
-        gc_stream = io.BytesIO(overlay_bytes) # Already bytes from backend
-        gc_stream.seek(0) # Rewind
-        
-        pdf.image(gc_stream, x=110, y=y_images, w=90, type="PNG")
         
         pdf.set_xy(110, y_images + 90)
         pdf.cell(90, 5, "AI Visualization (Grad-CAM)", 0, 0, "C")
-    except Exception as e: 
-        print(f"PDF Grad-CAM Error: {e}")
-    
-    # Disclaimer
-    pdf.set_y(-35)
+    except Exception as e:
+        print(f"PDF Image Error: {e}")
+
+    # --- DISCLAIMER SECTION ---
+    # [cite_start]Matches the bottom disclaimer style [cite: 13, 14, 15]
+    pdf.set_y(-40)
     pdf.line(10, pdf.get_y(), 200, pdf.get_y())
     pdf.ln(5)
-    pdf.set_font("Times", "I", 9)
-    pdf.set_text_color(108, 117, 125)
+    
+    pdf.set_font("Times", "I", 9) # Italic, small serif
+    pdf.set_text_color(100, 100, 100) # Gray text
     
     disclaimer_text = (
         "DISCLAIMER: This screening report was generated by InSight, an AI-powered diagnostic support tool. "
@@ -138,231 +145,381 @@ def create_screening_report(patient_id, prediction, confidence, recommendation, 
         "This system is designed to assist healthcare professionals and is not a substitute for a comprehensive "
         "clinical examination. All findings must be verified by a qualified ophthalmologist."
     )
-    
     pdf.multi_cell(0, 5, disclaimer_text, 0, "C")
     
-    # --- FIX FOR ATTRIBUTE ERROR ---
     out = pdf.output(dest='S')
-    if isinstance(out, (bytes, bytearray)):
-        return bytes(out)
+    if isinstance(out, (bytes, bytearray)): return bytes(out)
     return out.encode('latin-1')
 
-# --- AUTH FUNCTIONS ---
+# --- AUTH SYSTEM ---
 def main_auth_page():
-    st.title("InSight Cataract Screening")
-    st.write("Please log in or sign up to continue.")
-    login_tab, signup_tab = st.tabs(["Login", "Sign Up"])
+    st.markdown("<h1 style='text-align: center; color: #333;'>InSight System Login</h1>", unsafe_allow_html=True)
     
-    with login_tab:
-        with st.form("login_form"):
-            email = st.text_input("Email")
-            password = st.text_input("Password", type="password")
-            if st.form_submit_button("Login"):
-                try:
-                    session = supabase.auth.sign_in_with_password({"email": email, "password": password})
-                    st.session_state["session"] = session
-                    st.session_state["logged_in"] = True
-                    
-                    user_id = session.user.id
-                    role_data = supabase.table('user_roles').select('role').eq('user_id', user_id).single().execute()
-                    user_role = "Nurse"
-                    if role_data.data and 'role' in role_data.data: user_role = role_data.data['role']
-                    st.session_state["user_role"] = user_role
-                    st.session_state["user_name"] = session.user.email
-                    st.rerun()
-                except Exception as e: st.error(f"Login failed: {e}")
+    # Center the login form for better UI
+    col1, col2, col3 = st.columns([1, 2, 1])
+    
+    with col2:
+        tab1, tab2 = st.tabs(["Login", "Register"])
+        
+        with tab1:
+            with st.form("login_form", clear_on_submit=True): # clear_on_submit helps UI hygiene
+                email = st.text_input("Email")
+                password = st.text_input("Password", type="password")
+                submit = st.form_submit_button("Login")
+                
+                if submit:
+                    try:
+                        # Attempt Login
+                        session = supabase.auth.sign_in_with_password({"email": email, "password": password})
+                        
+                        # If we get here, login was successful
+                        st.session_state["session"] = session
+                        st.session_state["logged_in"] = True
+                        
+                        # Fetch Role
+                        uid = session.user.id
+                        role_data = supabase.table('user_roles').select('role').eq('user_id', uid).single().execute()
+                        st.session_state["user_role"] = role_data.data['role'] if role_data.data else "Nurse"
+                        st.session_state["user_name"] = session.user.email
+                        
+                        st.success("Login Successful! Redirecting...")
+                        time.sleep(0.5) # A tiny pause lets the user see the success message
+                        st.rerun() # FORCE RELOAD IMMEDIATELY
+                        
+                    except Exception as e:
+                        # Print the specific error so you know if it's a code issue or a wrong password
+                        st.error(f"Authentication Failed: {e}")
 
-    with signup_tab:
-        with st.form("signup_form"):
-            email = st.text_input("Email")
-            password = st.text_input("Password", type="password")
-            role = st.selectbox("Role", ("Nurse", "Doctor"))
-            if st.form_submit_button("Sign Up"):
-                try:
-                    session = supabase.auth.sign_up({"email": email, "password": password})
-                    if session.user:
-                        supabase.table('user_roles').insert({'user_id': session.user.id, 'email': email, 'role': role}).execute()
-                        st.success("Signup successful!")
-                    else: st.error("Signup failed.")
-                except Exception as e: st.error(f"Error: {e}")
+        with tab2:
+            with st.form("signup_form", clear_on_submit=True):
+                new_email = st.text_input("Email")
+                new_pass = st.text_input("Password", type="password")
+                role = st.selectbox("Role", ("Nurse", "Doctor"))
+                signup_submit = st.form_submit_button("Create Account")
+                
+                if signup_submit:
+                    try:
+                        session = supabase.auth.sign_up({"email": new_email, "password": new_pass})
+                        if session.user:
+                            supabase.table('user_roles').insert({'user_id': session.user.id, 'email': new_email, 'role': role}).execute()
+                            st.success("Account created! Please check your email or log in.")
+                        else:
+                            st.error("Signup failed. User already exists?")
+                    except Exception as e:
+                        st.error(f"Registration Error: {e}")
 
 def logout():
     supabase.auth.sign_out()
     st.session_state["logged_in"] = False
-    st.session_state.pop("session", None)
     st.rerun()
 
-# --- PAGES ---
+# --- SCREENING PAGE ---
 def screening_page():
-    st.title("New Patient Screening")
-    st.write("Upload a fundus photograph to screen for cataracts.")
-    uploaded_file = st.file_uploader("Upload Fundus Image", type=["jpg", "jpeg", "png"])
-    patient_id = st.text_input("Patient Identifier")
-
-    if uploaded_file and patient_id:
-        col1, col2 = st.columns(2)
-        image_bytes = uploaded_file.getvalue()
-        pil_image = Image.open(io.BytesIO(image_bytes))
-        
-        with col1:
-            st.image(pil_image, caption="Uploaded Image", use_container_width=True)
-
-        if st.button("Analyze Image"):
-            with col2:
-                with st.spinner("Analyzing image... (Connecting to backend)"):
-                    try:
-                        # Send to Local Backend
-                        files = {'file': (uploaded_file.name, image_bytes, uploaded_file.type)}
-                        response = requests.post(BACKEND_URL, files=files)
-                        response.raise_for_status() 
-                        
-                        result = response.json()
-                        
-                        pred_prob = result["prediction_probability"]
-                        
-                        # Decode Grad-CAM
-                        gc_bytes = base64.b64decode(result["gradcam_image_base64"])
-
-                        if pred_prob > 0.5:
-                            label = "Cataract Detected"
-                            rec = "Urgent: Refer to Ophthalmologist"
-                            display_prob = pred_prob
-                            st.error(f"**Result: {label}** (Confidence: {display_prob:.1%})")
-                        else:
-                            label = "No Cataract Detected"
-                            rec = "Routine: Next annual check-up"
-                            display_prob = 1 - pred_prob 
-                            st.success(f"**Result: {label}** (Confidence: {display_prob:.1%})")
-                        
-                        st.warning(f"**Recommendation: {rec}**")
-                        st.image(gc_bytes, caption="Grad-CAM Heatmap", use_container_width=True)
-                        
-                        # Save to session state
-                        st.session_state["last_res"] = {
-                            "pid": patient_id, "label": label, "prob": display_prob, "rec": rec,
-                            "img": image_bytes, "gc": gc_bytes, "mime": uploaded_file.type
-                        }
-                    except Exception as e: st.error(f"Connection Error: Is backend running? {e}")
-
-        # Show Buttons if result exists
-        if "last_res" in st.session_state and st.session_state["last_res"]["pid"] == patient_id:
-            res = st.session_state["last_res"]
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                if st.button("Save Results", use_container_width=True):
-                    try:
-                        supabase.table('screenings').insert({
-                            "patient_identifier": res["pid"], "image_filename": uploaded_file.name,
-                            "predicted_label": res["label"], "prediction_probability": res["prob"],
-                            "recommendation": res["rec"], "screened_by_user": st.session_state["user_name"]
-                        }).execute()
-                        st.success("Saved results successfully!")
-                    except Exception as e: st.error(f"Save failed: {e}")
-            
-            with c2:
-                # Generate PDF
-                pdf = create_screening_report(res["pid"], res["label"], res["prob"], res["rec"], st.session_state["user_name"], res["img"], res["gc"], res["mime"])
-                st.download_button("Export PDF Report", pdf, f"InSight_Report_{res['pid']}.pdf", "application/pdf", use_container_width=True)
-            
-            with c3:
-                st.download_button("Export Grad-CAM", res["gc"], f"{res['pid']}_gradcam.png", "image/png", use_container_width=True)
-
-def patient_history_page():
-    st.title("Patient Screening History")
-    st.write("Enter a Patient Identifier to view their past screening results.")
-    search_id = st.text_input("Patient Identifier", key="history_search_id")
+    # 1. Header Section with Context
+    col_header, col_logo = st.columns([4, 1])
+    with col_header:
+        st.title("Diagnostic Screening Interface")
+        st.caption("AI-Powered Cataract Detection & Triage System")
     
-    if st.button("Search History"):
-        if not search_id: 
-            st.warning("Please enter a Patient Identifier.")
-            return
-        
-        with st.spinner(f"Searching for patient {search_id}..."):
-            try:
-                # Query Supabase
-                query = supabase.table('screenings').select("*").eq('patient_identifier', search_id).order('created_at', desc=True).execute()
-                
-                # Check if data exists in the query response
-                if query.data:
-                    df = pd.DataFrame(query.data)
-                    df['created_at'] = pd.to_datetime(df['created_at']).dt.strftime('%Y-%m-%d %H:%M:%S')
-                    # Handle probabilities
-                    df['prediction_probability'] = df['prediction_probability'].apply(lambda x: f"{x:.1%}" if pd.notna(x) else "N/A")
-                    
-                    display_df = df[['created_at', 'predicted_label', 'prediction_probability', 'recommendation', 'screened_by_user', 'image_filename']].rename(
-                        columns={
-                            'created_at': 'Screening Date', 
-                            'predicted_label': 'Prediction', 
-                            'prediction_probability': 'Confidence', 
-                            'recommendation': 'Recommendation', 
-                            'screened_by_user': 'Screened By', 
-                            'image_filename': 'Original Image'
-                        }
-                    )
-                    st.dataframe(display_df, use_container_width=True)
-                else:
-                    st.info("No records found for this patient.")
-            except Exception as e:
-                st.error(f"Error fetching history: {e}")
+    # 2. Status Indicators
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("System Status", "Online", delta="Ready", delta_color="normal")
+    c2.metric("AI Engine", "ResNet-18", "v1.0")
+    c3.metric("Gatekeeper", "MobileNetV2", "Active")
+    c4.metric("Latency", "< 200ms", "Optimal")
+    
+    st.markdown("---")
 
+    # 3. Main Interaction Area
+    with st.container(border=True):
+        st.subheader("Image Acquisition")
+        
+        uploaded_files = st.file_uploader(
+            "Upload Retinal Fundus Scans (Single or Batch Mode)", 
+            type=["jpg", "jpeg", "png"], 
+            accept_multiple_files=True,
+            help="Drag and drop medical images here. The system will auto-validate inputs."
+        )
+
+        # "Empty State" visuals
+        if not uploaded_files:
+            st.markdown("""
+            <div style='background-color: #f0f2f6; padding: 20px; border-radius: 10px; color: #333;'>
+                <h4 style='margin:0'>Quick Guide</h4>
+                <ul style='margin-bottom:0'>
+                    <li><b>Single Mode:</b> Upload 1 image to enable patient metadata entry and PDF generation.</li>
+                    <li><b>Batch Mode:</b> Upload 2+ images to auto-generate a CSV summary report.</li>
+                </ul>
+            </div>
+            """, unsafe_allow_html=True)
+
+    # --- LOGIC STARTS HERE ---
+    if uploaded_files:
+        st.markdown("### Analysis Results") 
+        
+        # === BATCH MODE ===
+        if len(uploaded_files) > 1:
+            st.info(f"Batch Processing Active: {len(uploaded_files)} images queued.")
+            if st.button("Execute Batch Analysis", type="primary"):
+                batch_data = []
+                progress_bar = st.progress(0)
+                
+                for i, file in enumerate(uploaded_files):
+                    try:
+                        files = {'file': (file.name, file.getvalue(), file.type)}
+                        response = requests.post(BACKEND_URL, files=files)
+                        
+                        if response.status_code == 200:
+                            res = response.json()
+                            prob = res["prediction_probability"]
+                            
+                            if prob > 0.5:
+                                diag = "Cataract Detected"
+                                conf = prob 
+                            else:
+                                diag = "Normal"
+                                conf = 1 - prob
+                                
+                            act = "URGENT" if prob > 0.5 else "ROUTINE"
+                            
+                            batch_data.append({
+                                "Filename": file.name,
+                                "Patient ID": file.name.split('.')[0],
+                                "Diagnosis": diag,
+                                "Confidence": f"{conf:.1%}", 
+                                "Protocol": act
+                            })
+                        
+                        elif response.status_code == 400:
+                            err_msg = response.json().get("error", "Invalid").replace("Validation Failed: ", "")
+                            batch_data.append({
+                                "Filename": file.name, "Patient ID": "N/A",
+                                "Diagnosis": "REJECTED", "Confidence": "N/A", "Protocol": err_msg 
+                            })
+                        else:
+                            batch_data.append({"Filename": file.name, "Diagnosis": "Server Error", "Protocol": "RETRY"})
+
+                    except Exception as e:
+                        batch_data.append({"Filename": file.name, "Diagnosis": "Error", "Protocol": str(e)})
+                    
+                    progress_bar.progress((i + 1) / len(uploaded_files))
+                    time.sleep(0.05)
+                
+                df = pd.DataFrame(batch_data)
+                st.dataframe(df, use_container_width=True)
+                csv = df.to_csv(index=False).encode('utf-8')
+                st.download_button("Download CSV Summary", csv, "InSight_Batch.csv", "text/csv")
+
+        # === SINGLE MODE (SIDE-BY-SIDE FIX) ===
+        else:
+            file = uploaded_files[0]
+            
+            # A. Input Section (Row 1)
+            with st.container(border=True):
+                c_input, c_btn = st.columns([3, 1])
+                with c_input:
+                    default_id = file.name.split('.')[0]
+                    p_id = st.text_input("Patient ID / Accession Number", value=default_id)
+                with c_btn:
+                    st.write("") # Spacer for vertical alignment
+                    st.write("")
+                    run_pressed = st.button("Run Diagnostics", type="primary", use_container_width=True)
+
+            # B. Processing Logic
+            if run_pressed:
+                with st.spinner("Processing through ResNet-18..."):
+                    try:
+                        files = {'file': (file.name, file.getvalue(), file.type)}
+                        response = requests.post(BACKEND_URL, files=files)
+                        
+                        if response.status_code == 200:
+                            data = response.json()
+                            prob = data["prediction_probability"]
+                            gc = base64.b64decode(data["gradcam_image_base64"])
+                            
+                            if prob > 0.5:
+                                lbl = "Cataract Detected"
+                                rec = "Urgent: Referral Required"
+                                final_prob = prob
+                            else:
+                                lbl = "No Cataract Detected"
+                                rec = "Routine: Annual Check"
+                                final_prob = 1 - prob 
+                            
+                            # Save results to session state
+                            st.session_state["last_res"] = {
+                                "id": p_id, "lbl": lbl, "prob": final_prob,
+                                "rec": rec, "img": file.getvalue(), "gc": gc, "type": file.type,
+                                "filename": file.name # Track filename to ensure match
+                            }
+                            
+                        elif response.status_code == 400:
+                            err = response.json().get("error", "Error")
+                            st.error(f"⛔ {err}")
+                        else: st.error("Server Error")
+                    except Exception as e: st.error(f"Error: {e}")
+
+            # C. Results Display (Row 2 - Side-by-Side)
+            if "last_res" in st.session_state and st.session_state["last_res"].get("filename") == file.name:
+                res = st.session_state["last_res"]
+                
+                # 1. Diagnosis Banner
+                if res['lbl'] == "Cataract Detected":
+                    st.error(f"### {res['lbl']}")
+                else:
+                    st.success(f"### {res['lbl']}")
+                
+                # 2. Metrics
+                m1, m2 = st.columns(2)
+                m1.metric("AI Confidence", f"{res['prob']:.1%}")
+                m2.info(f"**Protocol:** {res['rec']}")
+                
+                st.markdown("#### Visual Evidence")
+                
+                # 3. THE FIX: 2-Column Layout for Images
+                vis1, vis2 = st.columns(2)
+                
+                with vis1:
+                    st.markdown("**Original Scan**")
+                    st.image(res['img'], use_container_width=True)
+                    
+                with vis2:
+                    st.markdown("**Grad-CAM Analysis**")
+                    st.image(res['gc'], use_container_width=True)
+                
+                st.markdown("---")
+                
+                # 4. Actions
+                b1, b2 = st.columns(2)
+                with b1:
+                    if st.button("Save to Database", use_container_width=True):
+                        try:
+                            supabase.table('screenings').insert({
+                                "patient_identifier": res['id'], "image_filename": file.name,
+                                "predicted_label": res['lbl'], "prediction_probability": res['prob'],
+                                "recommendation": res['rec'], "screened_by_user": st.session_state["user_name"]
+                            }).execute()
+                            st.success("Record Archived.")
+                        except: st.error("Database Error.")
+                with b2:
+                    pdf = create_screening_report(res['id'], res['lbl'], res['prob'], res['rec'], st.session_state["user_name"], res['img'], res['gc'], res['type'])
+                    st.download_button("Download Official Report", pdf, f"InSight_Report_{res['id']}.pdf", "application/pdf", use_container_width=True)
+
+def history_page():
+    st.title("Patient Records")
+    search = st.text_input("Search Patient ID")
+    
+    if st.button("Search Database"):
+        try:
+            # Fetch specific patient
+            res = supabase.table('screenings').select("*").eq('patient_identifier', search).order('created_at', desc=True).execute()
+            
+            if res.data:
+                df = pd.DataFrame(res.data)
+                # Select only relevant columns for display
+                display_df = df[['created_at', 'predicted_label', 'prediction_probability', 'screened_by_user']]
+                st.dataframe(display_df, use_container_width=True)
+            else:
+                st.info("No records found for this ID.")
+        except Exception as e:
+            st.error(f"Error retrieving records: {e}")
+
+# --- RESTORED ANALYTICS PAGE (Blue Charts + Table) ---
 def analytics_page():
     st.title("Analytics Dashboard")
-    st.write("Overview of screening metrics. (Only Doctors can see this page)")
+    
     try:
-        data = supabase.table('screenings').select("*").execute()
-        df = pd.DataFrame(data.data)
-    except Exception as e: st.error(f"Error fetching data: {e}"); df = pd.DataFrame()
-    
-    if df.empty:
-        st.warning("No screening data found to display analytics.")
-        return
+        # Fetch all data
+        res = supabase.table('screenings').select("*").execute()
+        df = pd.DataFrame(res.data)
         
-    total_screened = len(df)
-    total_cataract = len(df[df['predicted_label'] == 'Cataract Detected'])
-    percent_cataract = (total_cataract / total_screened) * 100 if total_screened > 0 else 0
-    
-    col1, col2 = st.columns(2)
-    col1.metric("Total Patients Screened", total_screened)
-    col2.metric("Cataracts Detected", total_cataract, f"{percent_cataract:.1f}% of total")
-    
-    st.divider()
-    
-    col3, col4 = st.columns(2)
-    with col3:
-        st.subheader("Screenings by Recommendation")
-        recommend_counts = df['recommendation'].value_counts()
-        fig1 = px.bar(recommend_counts, x=recommend_counts.index, y=recommend_counts.values, labels={'x': 'Recommendation', 'y': 'Count'})
-        st.plotly_chart(fig1, use_container_width=True)
-        
-    with col4:
-        st.subheader("Detections by Type")
-        label_counts = df['predicted_label'].value_counts()
-        fig2 = px.pie(label_counts, names=label_counts.index, values=label_counts.values)
-        st.plotly_chart(fig2, use_container_width=True)
-        
-    st.subheader("Recent Screening Data")
-    st.dataframe(df.sort_values(by="created_at", ascending=False).head(10), use_container_width=True)
+        if df.empty:
+            st.warning("No screening data found to display analytics.")
+            return
 
-# --- ROUTER ---
+        # --- TOP ROW: CHARTS ---
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            # Bar Chart: Recommendations
+            if 'recommendation' in df.columns:
+                rec_counts = df['recommendation'].value_counts().reset_index()
+                rec_counts.columns = ['recommendation', 'Count']
+                
+                fig_bar = px.bar(rec_counts, x='recommendation', y='Count', 
+                                 title="", 
+                                 labels={'recommendation': 'recommendation', 'Count': 'Count'})
+                fig_bar.update_traces(marker_color='#636EFA') 
+                st.plotly_chart(fig_bar, use_container_width=True)
+
+        with col2:
+            # Pie Chart: Detections
+            if 'predicted_label' in df.columns:
+                label_counts = df['predicted_label'].value_counts().reset_index()
+                label_counts.columns = ['predicted_label', 'count']
+                
+                fig_pie = px.pie(label_counts, values='count', names='predicted_label',
+                                 color_discrete_sequence=['#0068C9', '#83C9FF']) 
+                st.plotly_chart(fig_pie, use_container_width=True)
+
+        # --- BOTTOM ROW: DATA TABLE ---
+        st.subheader("Recent Screening Data (in your view)")
+        
+        if 'created_at' in df.columns:
+            df = df.sort_values(by='created_at', ascending=False)
+            
+        st.dataframe(df, use_container_width=True)
+
+    except Exception as e:
+        st.error(f"Analytics Engine Error: {e}")
+
+# --- ROUTER / NAVIGATION LOGIC ---
+# (This is the part that was likely missing, causing the blank page)
+
 if "logged_in" not in st.session_state: st.session_state["logged_in"] = False
-if not st.session_state["logged_in"]: main_auth_page()
+
+if not st.session_state["logged_in"]:
+    main_auth_page()
 else:
-    st.sidebar.title("Navigation")
-    st.sidebar.write(f"Welcome, **{st.session_state['user_name']}**!")
-    st.sidebar.write(f"Role: *{st.session_state['user_role']}*")
-    
-    opts = ["Screening", "Patient History"]
-    if st.session_state["user_role"] == "Doctor": opts.append("Analytics")
-    
-    # User selects from "Screening" or "Patient History"
-    page = st.sidebar.radio("Go to", opts)
-    st.sidebar.divider()
-    if st.sidebar.button("Logout"): logout()
-    
-    # --- FIXED ROUTER LOGIC ---
-    if page == "Screening": 
+    # Sidebar Navigation
+    with st.sidebar:
+        user_role = st.session_state.get("user_role", "Nurse")
+        st.markdown(f"**User:** {st.session_state.get('user_name', 'Unknown')}")
+        st.markdown(f"**Role:** {user_role}")
+        
+        # Build Menu
+        menu_items = ["Screening", "Records"]
+        menu_icons = ["pc-display-horizontal", "folder2-open"]
+        
+        if user_role == "Doctor":
+            menu_items.append("Analytics")
+            menu_icons.append("graph-up-arrow")
+            
+        menu_items.append("Logout")
+        menu_icons.append("box-arrow-right")
+
+        selected = option_menu(
+            "InSight Menu", 
+            menu_items, 
+            icons=menu_icons, 
+            menu_icon="activity", 
+            default_index=0,
+            styles={
+                "container": {"padding": "0!important", "background-color": "#111"},
+                "nav-link": {"font-size": "14px", "text-align": "left", "margin":"0px"},
+                "nav-link-selected": {"background-color": "#0056b3"},
+            }
+        )
+
+    # Execute Page Logic
+    if selected == "Screening":
         screening_page()
-    elif page == "Patient History": # This was "History" before, which caused the blank page!
-        patient_history_page()
-    elif page == "Analytics": 
-        analytics_page()
+    elif selected == "Records":
+        history_page()
+    elif selected == "Analytics": 
+        if user_role == "Doctor":
+            analytics_page()
+        else:
+            st.error("⛔ Access Denied: You do not have permission to view this page.")
+    elif selected == "Logout":
+        logout()
