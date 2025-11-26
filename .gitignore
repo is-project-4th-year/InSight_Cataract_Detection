@@ -1,0 +1,80 @@
+# Image data
+data/
+
+# Keras models
+*.keras
+
+# Virtual environment
+venv/
+
+# Python cache
+__pycache__/
+
+# Secrets file
+.env
+.streamlit/secrets.toml
+
+# --- Python cache ---
+__pycache__/
+*.py[cod]
+*.so
+
+# --- Virtual environment ---
+venv/
+ENV/
+env/
+.venv/
+
+# --- Python packaging ---
+build/
+dist/
+*.egg-info/
+
+# --- Streamlit cache & secrets ---
+.streamlit/
+.streamlit/secrets.toml
+
+# --- Environment files ---
+*.env
+.env.local
+.env.*.local
+
+# --- Data ---
+data/
+datasets/
+*.zip
+*.tar
+*.gz
+
+# --- Model weights / checkpoints ---
+*.pt
+*.pth
+*.h5
+*.ckpt
+
+# --- Logs / outputs ---
+logs/
+*.log
+*.out
+*.tmp
+*.bak
+*.old
+
+# --- IDE / editor settings ---
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# --- Jupyter notebook checkpoints ---
+.ipynb_checkpoints/
+
+# --- Reports / notebooks (optional) ---
+*.pdf
+*.docx
+*.rtf
+*.ipynb
+
+# --- OS specific ---
+.DS_Store
+Thumbs.db
